@@ -1,0 +1,42 @@
+version: '3.9'
+services:
+  ollama-service:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./models:/root/.ollama/models
+    command: ["ollama", "serve"]
+
+  telegram-bot:
+    build: .
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    depends_on:
+      - ollama-service
+      - redis-cache
+      - postgres-db
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+
+  redis-cache:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  postgres-db:
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=botuser
+      - POSTGRES_PASSWORD=botpass
+      - POSTGRES_DB=botdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  pgdata:
