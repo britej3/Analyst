@@ -11,6 +11,9 @@ import ccxt
 import talib
 import logging
 from typing import Dict, List
+import pybreaker
+
+from .cache import Cache
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,8 @@ class AIAnalyst:
         self.ollama_url = "http://localhost:11434/api/generate"
         self.model = "llama3.1:8b"
         self.analysis_cache = {}
+        self.cache = Cache()
+        self.breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=60)
         
     async def get_market_data(self, symbol='BTC/USDT', timeframe='1h', limit=100):
         """Get market data from exchange"""
@@ -130,13 +135,25 @@ Provide analysis in this JSON format:
 }}
             """
             
-            response = requests.post(self.ollama_url, json={
-                'model': self.model,
-                'prompt': prompt,
-                'stream': False,
-                'options': {'temperature': 0.1}  # Low temperature for consistent analysis
-            })
-            
+            cache_key = f"llm:{hash(prompt)}"
+            cached = self.cache.get_json(cache_key)
+            if cached:
+                return cached
+
+            def post_llm():
+                return requests.post(
+                    self.ollama_url,
+                    json={
+                        'model': self.model,
+                        'prompt': prompt,
+                        'stream': False,
+                        'options': {'temperature': 0.1},
+                    },
+                    timeout=30,
+                )
+
+            response = self.breaker.call(post_llm)
+
             if response.status_code == 200:
                 llm_response = response.json()['response']
                 # Try to extract JSON from response
@@ -146,6 +163,7 @@ Provide analysis in this JSON format:
                     end = llm_response.rfind('}') + 1
                     if start != -1 and end != 0:
                         analysis_json = json.loads(llm_response[start:end])
+                        self.cache.set_json(cache_key, analysis_json, ttl=600)
                         return analysis_json
                 except:
                     # Fallback to structured text parsing
@@ -179,6 +197,10 @@ Provide analysis in this JSON format:
     async def get_current_analysis(self):
         """Get current market analysis"""
         try:
+            cached = self.cache.get_json('analysis:current')
+            if cached and (datetime.now() - datetime.fromisoformat(cached['timestamp'])) < timedelta(minutes=5):
+                return cached['data']
+
             # Get fresh market data
             df = await self.get_market_data()
             if df is None:
@@ -204,8 +226,7 @@ Provide analysis in this JSON format:
             }
             
             # Cache analysis
-            self.analysis_cache['current'] = analysis
-            self.analysis_cache['timestamp'] = datetime.now()
+            self.cache.set_json('analysis:current', {'data': analysis, 'timestamp': datetime.now().isoformat()}, ttl=300)
             
             return analysis
             

@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from pythonjsonlogger import jsonlogger
 from dotenv import load_dotenv
 
 from src.researcher import TradingResearcher
@@ -17,29 +18,35 @@ from src.data_collector import DataCollector
 from src.ai_analyst import AIAnalyst
 from src.chart_analyzer import ChartAnalyzer
 from src.database import DatabaseManager
+from src.portfolio import PortfolioManager
+from src.alert_manager import AlertManager
 
 # Load environment variables
 load_dotenv()
 
 # Setup logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler('logs/bot.log'),
-        logging.StreamHandler()
-    ]
-)
+log_handler = logging.FileHandler('logs/bot.log')
+console_handler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter('%(asctime)s %(name)s %(levelname)s %(message)s')
+log_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+logging.basicConfig(level=logging.INFO, handlers=[log_handler, console_handler])
 logger = logging.getLogger(__name__)
 
 class TradingBot:
     def __init__(self):
         self.token = os.getenv('TELEGRAM_BOT_TOKEN')
+        if not self.token:
+            raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
         self.researcher = TradingResearcher()
         self.data_collector = DataCollector()
         self.ai_analyst = AIAnalyst()
         self.chart_analyzer = ChartAnalyzer()
         self.db = DatabaseManager()
+        self.portfolio = PortfolioManager()
+        self.alert_manager = AlertManager()
+        self.application = None
+        self.chat_id = None
         
         # Initialize components
         self.setup_components()
@@ -57,6 +64,8 @@ class TradingBot:
         asyncio.create_task(self.continuous_research())
         # Start model training every 6 hours
         asyncio.create_task(self.continuous_learning())
+        # Start price alert monitoring
+        asyncio.create_task(self.alert_manager.monitor_price(self.price_alert))
         
     async def continuous_data_collection(self):
         """Collect market data continuously"""
@@ -89,9 +98,16 @@ class TradingBot:
                 logger.error(f"Learning error: {e}")
                 await asyncio.sleep(1800)
 
+    async def price_alert(self, price: float, change: float):
+        """Send price alert via Telegram"""
+        text = f"BTC price moved {change:.2f}% to ${price:.2f}";
+        if self.application:
+            await self.application.bot.send_message(chat_id=self.chat_id, text=text)
+
     # Telegram Bot Handlers
     async def start(self, update: Update, context):
         """Start command handler"""
+        self.chat_id = update.effective_chat.id
         keyboard = [
             [InlineKeyboardButton("📊 Current Analysis", callback_data='analysis')],
             [InlineKeyboardButton("📈 Price Prediction", callback_data='prediction')],
@@ -210,14 +226,14 @@ class TradingBot:
 
     def run(self):
         """Start the bot"""
-        app = Application.builder().token(self.token).build()
-        
+        self.application = Application.builder().token(self.token).build()
+
         # Add handlers
-        app.add_handler(CommandHandler("start", self.start))
-        app.add_handler(CallbackQueryHandler(self.button_handler))
-        
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CallbackQueryHandler(self.button_handler))
+
         logger.info("Bot starting...")
-        app.run_polling()
+        self.application.run_polling()
 
 if __name__ == "__main__":
     bot = TradingBot()

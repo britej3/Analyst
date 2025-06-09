@@ -195,9 +195,13 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 
                 cursor.execute('''
-                    INSERT INTO research_data 
+                    INSERT INTO research_data
                     (source, title, content, url, sentiment, relevance_score)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (source, title, content, url, sentiment, relevance_score))
-                
-                conn.
+
+                conn.commit()
+                logger.info(f"Stored research data from {source}")
+
+        except Exception as e:
+            logger.error(f"Error storing research data: {e}")
