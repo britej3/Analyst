@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 mkdir -p logs
 
@@ -12,5 +12,5 @@ if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
 fi
 
 # Start Telegram bot
-python main_bot_py.py
+python3 main_bot_py.py
 

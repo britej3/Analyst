@@ -1,11 +1,16 @@
-FROM python:3.11-slim
+# Use an Ubuntu base image so the container matches
+# a typical local Ubuntu environment
+FROM ubuntu:22.04
 
-# Install system dependencies
+# Install Python and system dependencies
 RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
     git \
     curl \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
+
 
 # Install Ollama
 RUN curl -fsSL https://ollama.ai/install.sh | sh
@@ -15,7 +20,7 @@ WORKDIR /app
 
 # Copy requirements first for better caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
