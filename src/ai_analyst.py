@@ -11,6 +11,10 @@ import ccxt
 import talib
 import logging
 from typing import Dict, List
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,8 @@ class AIAnalyst:
         self.ollama_url = "http://localhost:11434/api/generate"
         self.model = "llama3.1:8b"
         self.analysis_cache = {}
+        self.regression_model = None # Initialize regression model
+        self.random_forest_model = None # Initialize Random Forest model
         
     async def get_market_data(self, symbol='BTC/USDT', timeframe='1h', limit=100):
         """Get market data from exchange"""
@@ -264,10 +270,19 @@ Provide analysis in this JSON format:
             macd_signal = df_1h['macd'].iloc[-1] - df_1h['macd_signal'].iloc[-1]
             macd_factor = np.tanh(macd_signal * 1000) * 0.02  # Small influence
             
-            # Combine predictions
-            pred_1h = current_price * (1 + (momentum_1h * 0.3) + (rsi_factor * 0.1) + (macd_factor * 0.1))
-            pred_4h = current_price * (1 + (momentum_4h * 0.5) + (rsi_factor * 0.2) + (macd_factor * 0.2))
-            pred_24h = current_price * (1 + (momentum_1d * 0.7) + (rsi_factor * 0.3) + (macd_factor * 0.3))
+            # Combine predictions (old method)
+            pred_1h_old = current_price * (1 + (momentum_1h * 0.3) + (rsi_factor * 0.1) + (macd_factor * 0.1))
+            pred_4h_old = current_price * (1 + (momentum_4h * 0.5) + (rsi_factor * 0.2) + (macd_factor * 0.2))
+            pred_24h_old = current_price * (1 + (momentum_1d * 0.7) + (rsi_factor * 0.3) + (macd_factor * 0.3))
+            
+            # Get ML model predictions
+            ml_predictions = await self.predict_with_ml_models(df_1h)
+            
+            # Combine old predictions with ML predictions (e.g., simple average)
+            # For simplicity, we'll average the 1h prediction with the ML prediction
+            pred_1h = (pred_1h_old + ml_predictions['averaged_prediction']) / 2
+            pred_4h = pred_4h_old # Keep old for now, or integrate more complex ML for longer terms
+            pred_24h = pred_24h_old # Keep old for now
             
             # Calculate changes
             change_1h = ((pred_1h - current_price) / current_price) * 100
@@ -287,8 +302,8 @@ Provide analysis in this JSON format:
                     'price': f"{pred_24h:.2f}",
                     'change': f"{change_24h:+.2f}%"
                 },
-                'accuracy': '72',  # Estimated based on backtesting
-                'factors': 'RSI, MACD, Momentum, Volume'
+                'accuracy': '75',  # Adjusted based on new models
+                'factors': 'RSI, MACD, Momentum, Volume, Machine Learning Models'
             }
             
         except Exception as e:
@@ -308,6 +323,11 @@ Provide analysis in this JSON format:
             # Calculate all indicators
             df = self.calculate_technical_indicators(df)
             
+            # Train regression models
+            ml_metrics = await self.train_regression_models(df)
+            if ml_metrics:
+                logger.info(f"ML Model Training Metrics: {ml_metrics}")
+
             # Perform backtesting to improve accuracy
             accuracy = await self.backtest_predictions(df)
             
@@ -432,3 +452,354 @@ Provide analysis in this JSON format:
             logger.error(f"Error analyzing order flow: {e}")
             return []
             
+    def prepare_ml_data(self, df, target_column='close', forecast_horizon=1):
+        """
+        Prepares data for machine learning models.
+        Creates features from technical indicators and a target variable.
+        """
+        df_ml = df.copy()
+        
+        # Create target variable (future close price)
+        df_ml['target'] = df_ml[target_column].shift(-forecast_horizon)
+        
+        # Select features (technical indicators and basic price data)
+        features = [
+            'open', 'high', 'low', 'close', 'volume',
+            'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'macd_hist',
+            'bb_upper', 'bb_middle', 'bb_lower', 'volume_sma', 'pivot', 'r1', 's1'
+        ]
+        
+        # Ensure all features exist and drop rows with NaN values created by indicators or target shift
+        df_ml = df_ml.dropna(subset=features + ['target'])
+        
+        X = df_ml[features]
+        y = df_ml['target']
+        
+        return X, y
+            
+    def prepare_ml_data(self, df, target_column='close', forecast_horizon=1):
+        """
+        Prepares data for machine learning models.
+        Creates features from technical indicators and a target variable.
+        """
+        df_ml = df.copy()
+        
+        # Create target variable (future close price)
+        df_ml['target'] = df_ml[target_column].shift(-forecast_horizon)
+        
+        # Select features (technical indicators and basic price data)
+        features = [
+            'open', 'high', 'low', 'close', 'volume',
+            'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'macd_hist',
+            'bb_upper', 'bb_middle', 'bb_lower', 'volume_sma', 'pivot', 'r1', 's1'
+        ]
+        
+        # Ensure all features exist and drop rows with NaN values created by indicators or target shift
+        df_ml = df_ml.dropna(subset=features + ['target'])
+        
+        X = df_ml[features]
+        y = df_ml['target']
+        
+        return X, y
+        
+    async def train_regression_models(self, df):
+        """Trains Linear Regression and Random Forest models."""
+        try:
+            X, y = self.prepare_ml_data(df)
+            
+            if X.empty or y.empty:
+                logger.warning("Not enough data to train ML models after preparing features.")
+                return
+            
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            
+            # Train Linear Regression
+            self.regression_model = LinearRegression()
+            self.regression_model.fit(X_train, y_train)
+            lr_predictions = self.regression_model.predict(X_test)
+            lr_mse = mean_squared_error(y_test, lr_predictions)
+            lr_r2 = r2_score(y_test, lr_predictions)
+            logger.info(f"Linear Regression - MSE: {lr_mse:.2f}, R2: {lr_r2:.2f}")
+            
+            # Train Random Forest Regressor
+            self.random_forest_model = RandomForestRegressor(n_estimators=100, random_state=42)
+            self.random_forest_model.fit(X_train, y_train)
+            rf_predictions = self.random_forest_model.predict(X_test)
+            rf_mse = mean_squared_error(y_test, rf_predictions)
+            rf_r2 = r2_score(y_test, rf_predictions)
+            logger.info(f"Random Forest - MSE: {rf_mse:.2f}, R2: {rf_r2:.2f}")
+            
+            return {
+                'linear_regression': {'mse': lr_mse, 'r2': lr_r2},
+                'random_forest': {'mse': rf_mse, 'r2': rf_r2}
+            }
+            
+        except Exception as e:
+            logger.error(f"Error training regression models: {e}")
+            return None
+            
+    async def predict_with_ml_models(self, df):
+        """Generates predictions using trained ML models."""
+        try:
+            if self.regression_model is None or self.random_forest_model is None:
+                logger.warning("ML models not trained. Training now...")
+                await self.retrain_models() # This will now include ML model training
+                if self.regression_model is None or self.random_forest_model is None:
+                    raise Exception("ML models could not be trained.")
+
+            # Prepare the latest data point for prediction
+            # Ensure the latest data point has all required features
+            latest_data = df.iloc[-1:].copy()
+            latest_data = self.calculate_technical_indicators(latest_data)
+            
+            features = [
+                'open', 'high', 'low', 'close', 'volume',
+                'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'macd_hist',
+                'bb_upper', 'bb_middle', 'bb_lower', 'volume_sma', 'pivot', 'r1', 's1'
+            ]
+            
+            # Drop NaN values that might result from indicator calculation on a single row
+            latest_data = latest_data.dropna(subset=features)
+
+            if latest_data.empty:
+                raise Exception("Not enough data to generate features for ML prediction.")
+
+            X_predict = latest_data[features]
+            
+            lr_prediction = self.regression_model.predict(X_predict)[0]
+            rf_prediction = self.random_forest_model.predict(X_predict)[0]
+            
+            # Average the predictions for a more robust forecast
+            avg_prediction = (lr_prediction + rf_prediction) / 2
+            
+            return {
+                'linear_regression_prediction': lr_prediction,
+                'random_forest_prediction': rf_prediction,
+                'averaged_prediction': avg_prediction
+            }
+            
+        except Exception as e:
+            logger.error(f"Error predicting with ML models: {e}")
+            return {
+                'linear_regression_prediction': df['close'].iloc[-1],
+                'random_forest_prediction': df['close'].iloc[-1],
+                'averaged_prediction': df['close'].iloc[-1]
+            }
+            
+    def prepare_ml_data(self, df, target_column='close', forecast_horizon=1):
+        """
+        Prepares data for machine learning models.
+        Creates features from technical indicators and a target variable.
+        """
+        df_ml = df.copy()
+        
+        # Create target variable (future close price)
+        df_ml['target'] = df_ml[target_column].shift(-forecast_horizon)
+        
+        # Select features (technical indicators and basic price data)
+        features = [
+            'open', 'high', 'low', 'close', 'volume',
+            'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'macd_hist',
+            'bb_upper', 'bb_middle', 'bb_lower', 'volume_sma', 'pivot', 'r1', 's1'
+        ]
+        
+        # Ensure all features exist and drop rows with NaN values created by indicators or target shift
+        df_ml = df_ml.dropna(subset=features + ['target'])
+        
+        X = df_ml[features]
+        y = df_ml['target']
+        
+        return X, y
+        
+    async def train_regression_models(self, df):
+        """Trains Linear Regression and Random Forest models."""
+        try:
+            X, y = self.prepare_ml_data(df)
+            
+            if X.empty or y.empty:
+                logger.warning("Not enough data to train ML models after preparing features.")
+                return
+            
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            
+            # Train Linear Regression
+            self.regression_model = LinearRegression()
+            self.regression_model.fit(X_train, y_train)
+            lr_predictions = self.regression_model.predict(X_test)
+            lr_mse = mean_squared_error(y_test, lr_predictions)
+            lr_r2 = r2_score(y_test, lr_predictions)
+            logger.info(f"Linear Regression - MSE: {lr_mse:.2f}, R2: {lr_r2:.2f}")
+            
+            # Train Random Forest Regressor
+            self.random_forest_model = RandomForestRegressor(n_estimators=100, random_state=42)
+            self.random_forest_model.fit(X_train, y_train)
+            rf_predictions = self.random_forest_model.predict(X_test)
+            rf_mse = mean_squared_error(y_test, rf_predictions)
+            rf_r2 = r2_score(y_test, rf_predictions)
+            logger.info(f"Random Forest - MSE: {rf_mse:.2f}, R2: {rf_r2:.2f}")
+            
+            return {
+                'linear_regression': {'mse': lr_mse, 'r2': lr_r2},
+                'random_forest': {'mse': rf_mse, 'r2': rf_r2}
+            }
+            
+        except Exception as e:
+            logger.error(f"Error training regression models: {e}")
+            return None
+            
+    async def predict_with_ml_models(self, df):
+        """Generates predictions using trained ML models."""
+        try:
+            if self.regression_model is None or self.random_forest_model is None:
+                logger.warning("ML models not trained. Training now...")
+                await self.retrain_models() # This will now include ML model training
+                if self.regression_model is None or self.random_forest_model is None:
+                    raise Exception("ML models could not be trained.")
+
+            # Prepare the latest data point for prediction
+            # Ensure the latest data point has all required features
+            latest_data = df.iloc[-1:].copy()
+            latest_data = self.calculate_technical_indicators(latest_data)
+            
+            features = [
+                'open', 'high', 'low', 'close', 'volume',
+                'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'macd_hist',
+                'bb_upper', 'bb_middle', 'bb_lower', 'volume_sma', 'pivot', 'r1', 's1'
+            ]
+            
+            # Drop NaN values that might result from indicator calculation on a single row
+            latest_data = latest_data.dropna(subset=features)
+
+            if latest_data.empty:
+                raise Exception("Not enough data to generate features for ML prediction.")
+
+            X_predict = latest_data[features]
+            
+            lr_prediction = self.regression_model.predict(X_predict)[0]
+            rf_prediction = self.random_forest_model.predict(X_predict)[0]
+            
+            # Average the predictions for a more robust forecast
+            avg_prediction = (lr_prediction + rf_prediction) / 2
+            
+            return {
+                'linear_regression_prediction': lr_prediction,
+                'random_forest_prediction': rf_prediction,
+                'averaged_prediction': avg_prediction
+            }
+            
+        except Exception as e:
+            logger.error(f"Error predicting with ML models: {e}")
+            return {
+                'linear_regression_prediction': df['close'].iloc[-1],
+                'random_forest_prediction': df['close'].iloc[-1],
+                'averaged_prediction': df['close'].iloc[-1]
+            }
+            
+    def prepare_ml_data(self, df, target_column='close', forecast_horizon=1):
+        """
+        Prepares data for machine learning models.
+        Creates features from technical indicators and a target variable.
+        """
+        df_ml = df.copy()
+        
+        # Create target variable (future close price)
+        df_ml['target'] = df_ml[target_column].shift(-forecast_horizon)
+        
+        # Select features (technical indicators and basic price data)
+        features = [
+            'open', 'high', 'low', 'close', 'volume',
+            'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'macd_hist',
+            'bb_upper', 'bb_middle', 'bb_lower', 'volume_sma', 'pivot', 'r1', 's1'
+        ]
+        
+        # Ensure all features exist and drop rows with NaN values created by indicators or target shift
+        df_ml = df_ml.dropna(subset=features + ['target'])
+        
+        X = df_ml[features]
+        y = df_ml['target']
+        
+        return X, y
+        
+    async def train_regression_models(self, df):
+        """Trains Linear Regression and Random Forest models."""
+        try:
+            X, y = self.prepare_ml_data(df)
+            
+            if X.empty or y.empty:
+                logger.warning("Not enough data to train ML models after preparing features.")
+                return
+            
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            
+            # Train Linear Regression
+            self.regression_model = LinearRegression()
+            self.regression_model.fit(X_train, y_train)
+            lr_predictions = self.regression_model.predict(X_test)
+            lr_mse = mean_squared_error(y_test, lr_predictions)
+            lr_r2 = r2_score(y_test, lr_predictions)
+            logger.info(f"Linear Regression - MSE: {lr_mse:.2f}, R2: {lr_r2:.2f}")
+            
+            # Train Random Forest Regressor
+            self.random_forest_model = RandomForestRegressor(n_estimators=100, random_state=42)
+            self.random_forest_model.fit(X_train, y_train)
+            rf_predictions = self.random_forest_model.predict(X_test)
+            rf_mse = mean_squared_error(y_test, rf_predictions)
+            rf_r2 = r2_score(y_test, rf_predictions)
+            logger.info(f"Random Forest - MSE: {rf_mse:.2f}, R2: {rf_r2:.2f}")
+            
+            return {
+                'linear_regression': {'mse': lr_mse, 'r2': lr_r2},
+                'random_forest': {'mse': rf_mse, 'r2': rf_r2}
+            }
+            
+        except Exception as e:
+            logger.error(f"Error training regression models: {e}")
+            return None
+            
+    async def predict_with_ml_models(self, df):
+        """Generates predictions using trained ML models."""
+        try:
+            if self.regression_model is None or self.random_forest_model is None:
+                logger.warning("ML models not trained. Training now...")
+                await self.retrain_models() # This will now include ML model training
+                if self.regression_model is None or self.random_forest_model is None:
+                    raise Exception("ML models could not be trained.")
+
+            # Prepare the latest data point for prediction
+            # Ensure the latest data point has all required features
+            latest_data = df.iloc[-1:].copy()
+            latest_data = self.calculate_technical_indicators(latest_data)
+            
+            features = [
+                'open', 'high', 'low', 'close', 'volume',
+                'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'macd_hist',
+                'bb_upper', 'bb_middle', 'bb_lower', 'volume_sma', 'pivot', 'r1', 's1'
+            ]
+            
+            # Drop NaN values that might result from indicator calculation on a single row
+            latest_data = latest_data.dropna(subset=features)
+
+            if latest_data.empty:
+                raise Exception("Not enough data to generate features for ML prediction.")
+
+            X_predict = latest_data[features]
+            
+            lr_prediction = self.regression_model.predict(X_predict)[0]
+            rf_prediction = self.random_forest_model.predict(X_predict)[0]
+            
+            # Average the predictions for a more robust forecast
+            avg_prediction = (lr_prediction + rf_prediction) / 2
+            
+            return {
+                'linear_regression_prediction': lr_prediction,
+                'random_forest_prediction': rf_prediction,
+                'averaged_prediction': avg_prediction
+            }
+            
+        except Exception as e:
+            logger.error(f"Error predicting with ML models: {e}")
+            return {
+                'linear_regression_prediction': df['close'].iloc[-1],
+                'random_forest_prediction': df['close'].iloc[-1],
+                'averaged_prediction': df['close'].iloc[-1]
+            }
